@@ -42,10 +42,14 @@ jobs:
     - name: Package Lambda function
       run: |
         cd lambda_function
-        python3.11 -m venv venv
-        source venv/bin/activate
         mkdir Package
-        pip install --no-cache-dir -r requirement.txt -t ./Package
+        pip install \
+          --platform manylinux2014_x86_64 \
+          --implementation cp \
+          --python-version 3.11 \
+          --only-binary=:all: \
+          --no-cache-dir \
+          -r requirement.txt -t ./Package
         cp app.py ./Package/
         cd Package
         zip -r ../../lambda.zip .
