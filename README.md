@@ -14,3 +14,7 @@ git push -u origin test
             │      └── branch = test
             │
             └───────── remote GitHub repository = origin
+
+
+
+once the workflows started so behind the scenes , a tiny linux instances is initited where all the packing ,all the deployment process is start happening
