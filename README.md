@@ -35,30 +35,45 @@ flowchart LR
 
 ## Pipeline flow
 
-```mermaid
-sequenceDiagram
-    participant Dev as Developer
-    participant GH as GitHub
-    participant CI as GitHub Actions (Ubuntu runner)
-    participant AWS as AWS Lambda
-
-    Dev->>GH: git push (branch: test or main)
-    GH->>CI: triggers deploy.yml workflow
-    CI->>CI: Checkout code
-    CI->>CI: Set up Python 3.11
-    CI->>CI: Install dependencies (jq, zip, boto3)
-    CI->>CI: Decide ENV vars (prod vs test, based on branch)
-    CI->>CI: Install app dependencies into ./Package
-    CI->>CI: Zip Package -> lambda.zip
-    CI->>AWS: Does function already exist?
-    alt Function does not exist
-        CI->>AWS: create-function (upload lambda.zip)
-    else Function exists
-        CI->>AWS: update-function-code (upload lambda.zip)
-        CI->>AWS: wait until update status = Successful
-        CI->>AWS: update-function-configuration (env vars)
-    end
-    AWS-->>Dev: Function live and ready to invoke
+```
+git push
+   ↓
+main / test
+   ↓
+GitHub Actions (ubuntu-latest)
+   ↓
+actions/checkout
+   ↓
+actions/setup-python → Python 3.11
+   ↓
+Install jq + zip + boto3
+   ↓
+Set ENV / API_KEY / LOG_LEVEL   (prod if main, test otherwise)
+   ↓
+pip install requirements
+   │
+   └── manylinux2014_x86_64
+       CPython 3.11 binaries      (Lambda-compatible wheels, not the CI machine's own)
+   ↓
+Package dependencies + app.py
+   ↓
+lambda.zip
+   ↓
+AWS CLI
+   ↓
+get-function
+   ↓
+Does Lambda exist?
+   │
+   ├── NO  → create-function (env vars set inline) ───┐
+   │                                                    │
+   └── YES → update-function-code                       │
+                 ↓                                       │
+              Poll status until "Successful"             │
+                 ↓                                       │
+          update-function-configuration (env vars)       │
+                 ↓                                       │
+                 └──────────────► Lambda function is live
 ```
 
 ## Project structure
@@ -74,7 +89,7 @@ AWS_LAMBDA_CICD/
 ## What the Lambda function itself does
 
 `app.py` is intentionally simple — it's a demo handler that:
-1. Calls a public test API (`jsonplaceholder.typicode.com`)
+1. Calls a public test API (`jsonplaceholder.typicode.com/posts/1`)
 2. Loads the response into a pandas DataFrame and prints it (to prove packaging worked)
 3. Prints out the `ENV`, `API_KEY`, and `LOG_LEVEL` environment variables the pipeline
    set, so you can see the test/prod values differ per branch
@@ -94,25 +109,52 @@ git push -u origin test
 Pushing to `test` (or `main`) triggers the workflow automatically — check the
 **Actions** tab on GitHub to watch it run.
 
-## Challenges faced while building this (and how they were fixed)
+## The debugging journey (STAR format)
 
-Since this was a learning project, most of the value came from debugging real
-pipeline failures. Here's what went wrong and how each was diagnosed and solved:
+Getting a "hello world" Lambda pipeline to actually work end-to-end turned out to
+involve nine separate real bugs across five different layers of the stack: YAML,
+bash, apt packaging, AWS CLI syntax, and Python/pandas runtime behavior. Framed as
+a STAR story:
+
+**Situation** — A GitHub Actions pipeline was supposed to package a Python Lambda
+function and deploy it automatically on every push. The very first run failed, and
+the GitHub UI only showed a generic message: `Process completed with exit code 100`
+— no explanation of what actually broke.
+
+**Task** — Get a pipeline that doesn't just report "success," but actually deploys
+a Lambda function that runs correctly when invoked. A green checkmark that hides a
+broken function isn't a finished job.
+
+**Action** — Instead of guessing from the vague UI error, each failure was traced
+back to the *actual* raw execution logs (`gh run view --log-failed`) to find the
+real root cause, one layer at a time:
 
 | # | Problem | Root cause | Fix |
 |---|---------|------------|-----|
-| 1 | `E: Unable to locate package python3.11` — pipeline failed at "Install dependencies" | `ubuntu-latest` runner had moved to Ubuntu 24.04, which ships Python 3.12 by default. `python3.11` isn't in its default apt repo. | Stopped installing Python via `apt-get` entirely and used the official `actions/setup-python@v5` action to pin Python 3.11 — reliable no matter what Ubuntu version GitHub uses. |
-| 2 | `line 10: [false: command not found`, and the pipeline kept trying to *update* a Lambda function that didn't exist yet | Bash `if` conditions were written as `if ["$VAR"=="value"]` with no spaces. In bash, `[` is actually a command, not a bracket symbol — it needs spaces around it and around `==`, otherwise bash tries to run a program literally named `[value` which doesn't exist. | Rewrote every condition as `if [ "$VAR" == "value" ]; then` (spaces after `[`, around `==`, and before `]`). |
-| 3 | YAML parsing errors inside the `run: |` blocks | Some lines inside a multi-line shell script were indented *less* than the first line of the block. YAML block scalars require every line to be indented at least as much as the first line, or parsing breaks. | Re-indented every line inside each `run: |` block consistently. |
-| 4 | `cd: Lambda_function: No such file or directory` and `zip file not found` when deploying | The workflow referenced `Lambda_function` and `Lambda.zip`, but the actual folder/file were `lambda_function` and `lambda.zip`. macOS (where the repo was written) ignores case, but the Linux GitHub runner does not. | Made all folder/file names consistently lowercase everywhere in the workflow. |
-| 5 | AWS CLI errors on `create-function` | Used `--zip_file` (underscore) instead of the real AWS CLI flag `--zip-file` (hyphen). | Corrected the flag name. |
-| 6 | `actions/Checkout@v3` failed to resolve | GitHub Action names are case-sensitive; the correct action is `actions/checkout@v3` (lowercase "c"). | Fixed the casing. |
-| 7 | Branch/env logic wasn't reliable | The same missing-space bracket issue as #2 also affected the `main` vs `test` environment check, so it wasn't reliably picking the right `ENV`/`API_KEY`/`LOG_LEVEL` values. | Fixed with the same bracket-spacing correction. |
+| 1 | `E: Unable to locate package python3.11` | `ubuntu-latest` moved to Ubuntu 24.04 (ships Python 3.12); `python3.11` isn't in its default apt repo | Used `actions/setup-python@v5` to pin Python 3.11 instead of apt |
+| 2 | `[false: command not found`, pipeline always tried to *update* a function that didn't exist | Bash `if ["$VAR"=="value"]` written with no spaces — `[` is a command in bash and needs spaces around it | Rewrote as `if [ "$VAR" == "value" ]; then` |
+| 3 | YAML parse errors inside `run: \|` blocks | Some lines indented *less* than the block's first line — YAML block scalars require consistent minimum indentation | Re-indented every line consistently |
+| 4 | `No such file or directory` for the app folder and zip | Workflow referenced `Lambda_function` / `Lambda.zip`, actual files were lowercase `lambda_function` / `lambda.zip` — macOS ignores case, Linux runners don't | Made all names consistently lowercase |
+| 5 | AWS CLI rejected `create-function` | Used `--zip_file` (underscore) instead of the real flag `--zip-file` (hyphen) | Corrected the flag |
+| 6 | `actions/Checkout@v3` failed to resolve | GitHub Action names are case-sensitive (`checkout`, not `Checkout`) | Fixed casing |
+| 7 | Prod/test env logic wasn't reliable | Same missing-space bracket issue as #2, in the branch-check `if` | Fixed with the same bracket-spacing correction |
+| 8 | Pipeline went green, but the Lambda function crashed with `Unable to import required dependency numpy` | `pip install` on the GitHub Ubuntu runner downloaded a numpy binary built for Ubuntu, not for AWS Lambda's actual Amazon Linux execution environment | Forced `pip install --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11` to fetch the Lambda-compatible wheel |
+| 9 | `ValueError: If using all scalar values, you must pass an index` | The API endpoint (`/posts/1`) returns one JSON object (all scalar values), and `pd.DataFrame(data)` can't infer row count from scalars alone | Wrapped it as `pd.DataFrame([data])` so pandas treats it as one row |
 
-**Biggest lesson:** most of these failures weren't AWS problems at all — they were
-small shell/YAML syntax mistakes that only show up once code runs on a real Linux
-CI runner (case sensitivity, bracket spacing, indentation) rather than on a local
-Mac terminal where some of these mistakes silently "work."
+**Result** — A fully working pipeline: every push to `test` or `main` now builds a
+Lambda-compatible package, deploys it automatically, and the function runs
+successfully end-to-end (verified with a real test invoke returning `StatusCode: 200`)
+— not just a green checkmark, but a function that actually does what it's supposed to.
+
+### How this maps to Amazon's Leadership Principles
+
+| Leadership Principle | How it showed up here |
+|---|---|
+| **Dive Deep** | Never stopped at the GitHub UI's generic "exit code 100/254" message — pulled the actual raw logs every single time to find the real root cause instead of guessing. |
+| **Ownership** | Didn't consider the job done when the pipeline turned green — kept testing the *actual* Lambda invoke and found (and fixed) two more runtime bugs that a "pipeline passed" status would have hidden. |
+| **Insist on the Highest Standards** | Treated "the CI job succeeded" as necessary but not sufficient — the real bar was "the deployed function works when called," which required catching the numpy packaging mismatch and the pandas scalar bug. |
+| **Learn and Be Curious** | Each failure came from a different unfamiliar layer (apt package naming, bash test-command syntax, YAML block-scalar indentation rules, manylinux wheel tags) — each was researched and understood rather than worked around blindly. |
+| **Bias for Action** | Iterated in small, fast pushes — fix one bug, push, observe the real result, fix the next — rather than trying to design a "perfect" workflow up front before testing anything. |
 
 ## Tech stack
 
