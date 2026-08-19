@@ -9,7 +9,7 @@ def lambda_handler(event,context):
     response=requests.get('https://jsonplaceholder.typicode.com/posts/1')
     data=response.json()
     
-    df=pd.DataFrame(data)
+    df=pd.DataFrame([data])
     print(df.head())
     
     
