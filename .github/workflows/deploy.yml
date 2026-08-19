@@ -14,10 +14,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y python3.11 python3.11-venv python3-pip jq zip
+        sudo apt-get install -y jq zip
         pip install boto3
 
     - name: Set environment variables
@@ -68,7 +73,7 @@ jobs:
             --runtime python3.11 \
             --role arn:aws:iam::626495478872:role/test-dev-lambda \
             --handler app.lambda_handler \
-            --zip_file fileb://lambda.zip \
+            --zip-file fileb://lambda.zip \
             --region $REGION \
             --environment "$ENV_VARS"
 
