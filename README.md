@@ -27,11 +27,17 @@ flowchart LR
     Dev[Developer] -->|git push| GH[GitHub Repo]
     GH -->|triggers| GA[GitHub Actions Runner<br/>Ubuntu VM]
     GA -->|pip install + zip| Pkg[lambda.zip]
-    GA -->|AWS CLI, using<br/>repo secrets| IAM[IAM Role]
-    IAM --> Lambda[AWS Lambda Function]
+    GA -->|AWS CLI calls, authenticated via<br/>GitHub Secrets IAM user| Deploy[Deploy-time credentials<br/>IAM User]
+    Deploy -->|create-function /<br/>update-function-code| Lambda[AWS Lambda Function]
+    ExecRole[Lambda Execution Role<br/>test-dev-lambda] -.attached to.-> Lambda
     Lambda -->|invoke| API[jsonplaceholder API]
     Lambda --> CW[CloudWatch Logs]
 ```
+
+*Two distinct identities are involved: the **deploy-time IAM user** (credentials stored in
+GitHub Secrets, used by the pipeline to call the AWS API and push code) and the **Lambda
+execution role** (`test-dev-lambda`, attached to the function itself, used at invoke time
+to access AWS services like CloudWatch). They are not the same identity.*
 
 ## Pipeline flow
 
@@ -146,15 +152,27 @@ Lambda-compatible package, deploys it automatically, and the function runs
 successfully end-to-end (verified with a real test invoke returning `StatusCode: 200`)
 — not just a green checkmark, but a function that actually does what it's supposed to.
 
-### How this maps to Amazon's Leadership Principles
+### Engineering lessons
 
-| Leadership Principle | How it showed up here |
-|---|---|
-| **Dive Deep** | Never stopped at the GitHub UI's generic "exit code 100/254" message — pulled the actual raw logs every single time to find the real root cause instead of guessing. |
-| **Ownership** | Didn't consider the job done when the pipeline turned green — kept testing the *actual* Lambda invoke and found (and fixed) two more runtime bugs that a "pipeline passed" status would have hidden. |
-| **Insist on the Highest Standards** | Treated "the CI job succeeded" as necessary but not sufficient — the real bar was "the deployed function works when called," which required catching the numpy packaging mismatch and the pandas scalar bug. |
-| **Learn and Be Curious** | Each failure came from a different unfamiliar layer (apt package naming, bash test-command syntax, YAML block-scalar indentation rules, manylinux wheel tags) — each was researched and understood rather than worked around blindly. |
-| **Bias for Action** | Iterated in small, fast pushes — fix one bug, push, observe the real result, fix the next — rather than trying to design a "perfect" workflow up front before testing anything. |
+- **A green pipeline is an infrastructure signal, not a correctness proof.** The deploy
+  succeeded well before the function actually worked — packaging compatibility and
+  application logic bugs only surfaced by testing the real invoke, not the CI status.
+- **Read the actual logs, not the summary.** Every generic UI message (`exit code 100`,
+  `exit code 254`) turned out to have a specific, fixable root cause one layer down.
+- **CI runners and target runtimes are not the same environment.** Code and native
+  dependencies (numpy) built on a GitHub Ubuntu runner are not guaranteed to run on
+  AWS Lambda's Amazon Linux execution environment without explicitly targeting it.
+- **Small, fast iterations beat over-designing upfront.** Each fix was pushed and
+  verified against the real pipeline immediately rather than trying to anticipate
+  every failure mode in advance.
+
+## Production improvements (not implemented)
+
+- **OIDC instead of long-lived AWS credentials** — the pipeline currently authenticates
+  using static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` GitHub Secrets. This works,
+  but GitHub's recommended approach for production is OIDC federation (`aws-actions/configure-aws-credentials`
+  with a trust policy), which issues short-lived, per-run credentials instead of storing
+  long-lived keys in the repo. Left as a future improvement rather than a current gap.
 
 ## Tech stack
 
