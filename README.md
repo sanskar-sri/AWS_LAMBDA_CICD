@@ -181,3 +181,6 @@ successfully end-to-end (verified with a real test invoke returning `StatusCode:
 - **GitHub Actions** — CI/CD automation (Ubuntu runner)
 - **Python 3.11** — Lambda runtime + packaging environment
 - **pandas / requests** — sample dependencies to prove packaging works end-to-end
+
+
+--v3
